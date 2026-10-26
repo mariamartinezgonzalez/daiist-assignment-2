@@ -1,4 +1,5 @@
-"""Assignment 2 training pipeline: download, finetune, evaluate, cost, save."""
+"""Assignment 2 training pipeline: download, finetune, evaluate, cost, save.
+Set SKIP_TRAIN=1 to re-evaluate the committed weights without retraining."""
 import json
 import os
 import shutil
@@ -98,6 +99,37 @@ def det_metrics(model, data_yaml, names):
     return dict(map50=float(b.map50), map50_95=float(b.map), per_class=per)
 
 
+def coco_baseline(pos_idx):
+    """Pretrained COCO yolo11n used zero-shot on the same test images.
+    COCO has no head or helmet class, so no predicted class can match ours and
+    detection mAP is 0 by construction. As the fairest image-level proxy I use
+    the confidence of its 'person' class as the alert score."""
+    coco = YOLO("yolo11n.pt")
+    person_id = [k for k, v in coco.names.items() if v == "person"][0]
+    rows = []
+    for img in sorted((DATA / "test" / "images").glob("*")):
+        lab = DATA / "test" / "labels" / (img.stem + ".txt")
+        lines = lab.read_text().splitlines() if lab.exists() else []
+        y = int(any(l.split() and int(l.split()[0]) == pos_idx for l in lines))
+        r = coco.predict(str(img), conf=0.001, imgsz=IMGSZ, verbose=False)[0]
+        s = max([cf for c, cf in zip(r.boxes.cls.tolist(), r.boxes.conf.tolist())
+                 if int(c) == person_id], default=0.0)
+        rows.append((y, s))
+    df = pd.DataFrame(rows, columns=["y_true", "score"])
+    sw = sweep(df["y_true"].values, df["score"].values)
+    best = sw.loc[sw["cost_per_1000"].idxmin()]
+    return {
+        "has_matching_class": False,
+        "map50": 0.0,
+        "map50_95": 0.0,
+        "note": "COCO has no head/helmet class, so detection mAP is 0 by construction. "
+                "person_proxy uses its 'person' confidence as the alert score.",
+        "person_proxy": {"threshold": float(best["threshold"]),
+                         "tpr": float(best["tpr"]), "fpr": float(best["fpr"])},
+        "cost_per_1000": float(best["cost_per_1000"]),
+    }
+
+
 def main():
     costs.require_filled()
     OUT.mkdir(exist_ok=True)
@@ -106,14 +138,17 @@ def main():
     pos_idx = names.index(POSITIVE)
     counts, size = label_stats(names)
 
-    model = YOLO("yolo11n.pt")
-    model.train(data=str(data_yaml), epochs=EPOCHS, imgsz=IMGSZ, fraction=FRACTION,
-                batch=BATCH, workers=2,
-                project=str(ROOT / "runs"), name="hardhat", exist_ok=True, seed=0)
-    shutil.copy(model.trainer.best, WEIGHTS / "best.pt")
-    for f in ("confusion_matrix.png", "confusion_matrix_normalized.png", "results.png"):
-        if (model.trainer.save_dir / f).exists():
-            shutil.copy(model.trainer.save_dir / f, OUT / f)
+    if os.environ.get("SKIP_TRAIN") == "1":
+        print("SKIP_TRAIN=1: re-evaluating the committed weights, no training.")
+    else:
+        model = YOLO("yolo11n.pt")
+        model.train(data=str(data_yaml), epochs=EPOCHS, imgsz=IMGSZ, fraction=FRACTION,
+                    batch=BATCH, workers=2,
+                    project=str(ROOT / "runs"), name="hardhat", exist_ok=True, seed=0)
+        shutil.copy(model.trainer.best, WEIGHTS / "best.pt")
+        for f in ("confusion_matrix.png", "confusion_matrix_normalized.png", "results.png"):
+            if (model.trainer.save_dir / f).exists():
+                shutil.copy(model.trainer.save_dir / f, OUT / f)
 
     tuned = YOLO(str(WEIGHTS / "best.pt"))
     tuned_metrics = det_metrics(tuned, data_yaml, names)
@@ -123,17 +158,8 @@ def main():
     sw.to_csv(OUT / "cost_sweep.csv", index=False)
     best_row = sw.loc[sw["cost_per_1000"].idxmin()]
 
-    # Baselines on the same test split.
-    coco = YOLO("yolo11n.pt")  # COCO classes only
-    coco_has_class = POSITIVE in coco.names.values() or "helmet" in coco.names.values()
     baselines = {
-        "coco_zero_shot": {
-            "has_matching_class": coco_has_class,
-            "note": "COCO has no head/helmet class, so it detects none of our classes: "
-                    "mAP50 = mAP50-95 = 0 by construction.",
-            "map50": 0.0, "map50_95": 0.0,
-            "cost_per_1000": cost_per_1000(0.0, 0.0),
-        },
+        "coco_zero_shot": coco_baseline(pos_idx),
         "predict_nothing": {"cost_per_1000": cost_per_1000(0.0, 0.0)},
         "flag_everything": {"cost_per_1000": cost_per_1000(1.0, 1.0)},
         "human_checks_everything_per_1000": 1000 * costs.C_REVIEW,
