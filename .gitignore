@@ -16,3 +16,5 @@ runs/
 .env
 data/
 runs/
+*.pt
+!weights/best.pt
