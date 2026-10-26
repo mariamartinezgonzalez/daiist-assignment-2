@@ -119,8 +119,8 @@ with gr.Blocks(title="Hard hat check: cost and review dashboard") as demo:
         "Move the two thresholds to see cost and human-review load change."
     )
     with gr.Row():
-        t_low = gr.Slider(0, 1, value=round(CHOSEN / 2, 2), step=0.01, label="Pass / review threshold")
-        t_high = gr.Slider(0, 1, value=round(CHOSEN, 2), step=0.01, label="Review / fail threshold")
+        t_low = gr.Slider(0, 1, value=0.01, step=0.005, label="Pass / review threshold")
+        t_high = gr.Slider(0, 1, value=0.5, step=0.005, label="Review / fail threshold")
     with gr.Row():
         cases_day = gr.Number(value=2000, label="Images per day (my assumption)")
         minutes = gr.Number(value=0.5, label="Minutes per review (my assumption)")
